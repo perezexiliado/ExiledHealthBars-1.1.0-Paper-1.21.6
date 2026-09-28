@@ -1,0 +1,37 @@
+# ExiledHealthBars 1.1.0 | Paper 1.21.6 + Geyser
+# La barra aparece temporalmente cuando un jugador ataca a un mob.
+# Diseño sólido: [██████░░░░░░], con gradiente verde -> amarillo -> rojo.
+
+display:
+  # COMBAT: visible solo despues de que un jugador ataque al mob (predeterminado).
+  # NEARBY: visible siempre mientras el mob este cerca de algun jugador.
+  mode: COMBAT
+  # Radio por jugador. No escanea entidades de todos los mundos (rendimiento).
+  radius-blocks: 32
+  # Revisa mobs nuevos y fuera de alcance una vez por segundo.
+  scan-interval-ticks: 20
+  # Actualiza la vida y su color cuatro veces por segundo.
+  update-interval-ticks: 5
+  # Limite global de mobs visibles al mismo tiempo para prevenir lag.
+  max-tracked-mobs: 500
+
+combat:
+  # Segundos que permanece visible desde el ultimo ataque del jugador.
+  duration-seconds: 10
+
+bar:
+  # Segmentos de la barra (5 a 20).
+  length: 12
+  # Ejemplo: [██████░░░░░░] 7/10 ♥
+  show-numbers: true
+  # Si se activa, añade el tipo de mob (en ingles, p.ej. SHEEP).
+  # Los nombres personalizados que ya eran visibles se mantienen aunque sea false.
+  show-mob-name: false
+
+entities:
+  # Incluye mobs con nombres personalizados (ojo con MythicMobs y plugins de nametags).
+  include-custom-named-mobs: true
+  # Incluye Wither y Ender Dragon (ya disponen de una bossbar vanilla).
+  include-bosses: true
+  # Citizens y otros NPC suelen marcar entidades con metadata "NPC".
+  include-npcs: false

@@ -1,0 +1,15 @@
+name: ExiledHealthBars
+version: '1.1.0'
+main: me.exi.healthbars.ExiledHealthBarsPlugin
+api-version: '1.21.6'
+author: Exiliados MC
+description: Barras RGB de vida que aparecen cuando un jugador ataca a un mob.
+commands:
+  exhealth:
+    description: Estado y recarga de la configuracion.
+    usage: /exhealth <status|reload>
+    permission: exhealth.admin
+permissions:
+  exhealth.admin:
+    description: Permite consultar el estado y recargar la configuracion.
+    default: op
