@@ -65,8 +65,7 @@ final class HealthBarFormatter {
     }
 
     private static String number(double value) {
-        return Math.abs(value - Math.rint(value)) < 0.05
-                ? Long.toString(Math.round(value))
-                : String.format(Locale.ROOT, "%.1f", value);
+        String rounded = String.format(Locale.ROOT, "%.1f", value);
+        return rounded.endsWith(".0") ? rounded.substring(0, rounded.length() - 2) : rounded;
     }
 }

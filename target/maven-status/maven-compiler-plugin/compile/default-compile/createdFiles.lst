@@ -1,4 +1,6 @@
+me\exi\healthbars\DeathMessageSanitizer$EntityNames.class
+me\exi\healthbars\ExiledHealthBarsPlugin$TrackedMob.class
 me\exi\healthbars\HealthBarFormatter.class
 me\exi\healthbars\ExiledHealthBarsPlugin.class
 me\exi\healthbars\ExiledHealthBarsPlugin$1.class
-me\exi\healthbars\ExiledHealthBarsPlugin$TrackedMob.class
+me\exi\healthbars\DeathMessageSanitizer.class

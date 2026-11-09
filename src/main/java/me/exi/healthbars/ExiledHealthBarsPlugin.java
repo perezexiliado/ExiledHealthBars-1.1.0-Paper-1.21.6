@@ -1,16 +1,23 @@
 package me.exi.healthbars;
 
+import com.destroystokyo.paper.event.entity.EntityRemoveFromWorldEvent;
+import com.google.gson.JsonParseException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.serializer.gson.GsonComponentSerializer;
+import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
-import org.bukkit.Chunk;
+import org.bukkit.Location;
 import org.bukkit.NamespacedKey;
+import org.bukkit.World;
 import org.bukkit.attribute.Attribute;
 import org.bukkit.attribute.AttributeInstance;
 import org.bukkit.command.Command;
@@ -26,7 +33,10 @@ import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.entity.EntityDamageByEntityEvent;
 import org.bukkit.event.entity.EntityDeathEvent;
-import org.bukkit.event.world.ChunkUnloadEvent;
+import org.bukkit.event.entity.EntityTransformEvent;
+import org.bukkit.event.entity.PlayerDeathEvent;
+import org.bukkit.event.world.EntitiesLoadEvent;
+import org.bukkit.event.world.EntitiesUnloadEvent;
 import org.bukkit.persistence.PersistentDataContainer;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.java.JavaPlugin;
@@ -38,12 +48,16 @@ import org.bukkit.scheduler.BukkitTask;
  * COMBAT muestra la barra temporalmente cuando un jugador golpea a un mob.
  */
 public final class ExiledHealthBarsPlugin extends JavaPlugin implements Listener, CommandExecutor {
+    private static final LegacyComponentSerializer LEGACY = LegacyComponentSerializer.builder()
+            .character('\u00a7').hexColors().useUnusualXRepeatedCharacterHexFormat().build();
     private final Map<UUID, TrackedMob> tracked = new HashMap<>();
     private final Set<UUID> externallyControlled = new HashSet<>();
     private NamespacedKey managedKey;
     private NamespacedKey oldNameKey;
     private NamespacedKey oldVisibleKey;
     private NamespacedKey lastAppliedKey;
+    private NamespacedKey oldNameJsonKey;
+    private NamespacedKey lastAppliedJsonKey;
     private BukkitTask updateTask;
 
     private boolean nearbyMode;
@@ -60,6 +74,9 @@ public final class ExiledHealthBarsPlugin extends JavaPlugin implements Listener
     private boolean includeNpcs;
     private long serverTicks;
     private long lastScan;
+    private long lastRefresh;
+    private int lastServerTick;
+    private long taskGeneration;
 
     @Override
     public void onEnable() {
@@ -67,10 +84,18 @@ public final class ExiledHealthBarsPlugin extends JavaPlugin implements Listener
         oldNameKey = new NamespacedKey(this, "old_name");
         oldVisibleKey = new NamespacedKey(this, "old_visible");
         lastAppliedKey = new NamespacedKey(this, "last_applied");
+        oldNameJsonKey = new NamespacedKey(this, "old_name_json");
+        lastAppliedJsonKey = new NamespacedKey(this, "last_applied_json");
         saveDefaultConfig();
         loadOptions();
         Bukkit.getPluginManager().registerEvents(this, this);
         Objects.requireNonNull(getCommand("exhealth"), "Falta exhealth en plugin.yml").setExecutor(this);
+        // También en COMBAT: no dejar barras de un cierre abrupto hasta el próximo ataque.
+        for (World world : Bukkit.getWorlds()) {
+            for (LivingEntity mob : world.getLivingEntities()) {
+                recoverIfMarked(mob);
+            }
+        }
         startTask();
         getLogger().info("ExiledHealthBars 1.1.0 activo: " + (nearbyMode
                 ? "todos los mobs cercanos, incluyendo animales pacificos" : "modo combate") + ".");
@@ -78,6 +103,7 @@ public final class ExiledHealthBarsPlugin extends JavaPlugin implements Listener
 
     @Override
     public void onDisable() {
+        taskGeneration++;
         if (updateTask != null) {
             updateTask.cancel();
         }
@@ -110,19 +136,63 @@ public final class ExiledHealthBarsPlugin extends JavaPlugin implements Listener
     }
 
     private void startTask() {
+        taskGeneration++;
         if (updateTask != null) {
             updateTask.cancel();
         }
         serverTicks = 0;
+        lastServerTick = Bukkit.getCurrentTick();
         lastScan = -scanInterval;
+        lastRefresh = -updatePeriod;
         updateTask = Bukkit.getScheduler().runTaskTimer(this, () -> {
-            serverTicks += updatePeriod;
-            if (nearbyMode && serverTicks - lastScan >= scanInterval) {
-                scanNearby();
+            updateClock();
+            if (serverTicks - lastScan >= scanInterval) {
+                if (nearbyMode) {
+                    scanNearby();
+                } else {
+                    pruneExternallyControlled();
+                }
                 lastScan = serverTicks;
             }
-            refreshTracked();
-        }, 1L, updatePeriod);
+            if (serverTicks - lastRefresh >= updatePeriod) {
+                refreshTracked();
+                lastRefresh = serverTicks;
+            }
+        }, 1L, greatestCommonDivisor(scanInterval, updatePeriod));
+    }
+
+    private static int greatestCommonDivisor(int first, int second) {
+        while (second != 0) {
+            int remainder = first % second;
+            first = second;
+            second = remainder;
+        }
+        return first;
+    }
+
+    private void updateClock() {
+        int currentTick = Bukkit.getCurrentTick();
+        // La resta int conserva el tiempo transcurrido incluso al desbordarse el contador.
+        serverTicks += Integer.toUnsignedLong(currentTick - lastServerTick);
+        lastServerTick = currentTick;
+    }
+
+    private void pruneExternallyControlled() {
+        externallyControlled.removeIf(id -> {
+            Entity entity = Bukkit.getEntity(id);
+            if (entity == null || !entity.isValid()) {
+                return true;
+            }
+            Location location = entity.getLocation();
+            double radiusSq = (double) radius * radius;
+            for (Player player : Bukkit.getOnlinePlayers()) {
+                if (player.isValid() && player.getWorld().equals(entity.getWorld())
+                        && player.getLocation().distanceSquared(location) <= radiusSq) {
+                    return false;
+                }
+            }
+            return true;
+        });
     }
 
     private boolean eligible(LivingEntity mob) {
@@ -139,12 +209,12 @@ public final class ExiledHealthBarsPlugin extends JavaPlugin implements Listener
         if (!includeNpcs && mob.hasMetadata("NPC")) {
             return false;
         }
-        return includeNamed || mob.getCustomName() == null || tracked.containsKey(mob.getUniqueId());
+        return includeNamed || mob.customName() == null || tracked.containsKey(mob.getUniqueId());
     }
 
     /** Escanea solo los mobs cargados alrededor de jugadores, NO todos los mobs de todos los mundos. */
     private void scanNearby() {
-        final Set<UUID> seen = new HashSet<>();
+        final Map<UUID, LivingEntity> seen = new LinkedHashMap<>();
         for (Player player : Bukkit.getOnlinePlayers()) {
             if (!player.isValid()) {
                 continue;
@@ -158,23 +228,27 @@ public final class ExiledHealthBarsPlugin extends JavaPlugin implements Listener
                     continue;
                 }
                 UUID uuid = mob.getUniqueId();
-                seen.add(uuid);
-                if (!tracked.containsKey(uuid)) {
-                    // Repara barras persistidas si el proceso se cerró abruptamente.
-                    recoverIfMarked(mob);
-                    if (tracked.size() < maximumTracked && eligible(mob)) {
-                        acquire(mob);
-                    }
-                }
+                seen.putIfAbsent(uuid, mob);
             }
         }
         // Permite que otro plugin gestione el nombre mientras el mob siga a la vista.
-        externallyControlled.retainAll(seen);
+        externallyControlled.retainAll(seen.keySet());
         // Restaura el nombre cuando el último jugador se aleja del mob.
         for (TrackedMob entry : new ArrayList<>(tracked.values())) {
-            if (!seen.contains(entry.mob.getUniqueId())) {
+            if (!seen.containsKey(entry.mob.getUniqueId()) || !entry.mob.isValid()
+                    || entry.mob.isDead() || entry.mob.getHealth() <= 0) {
                 tracked.remove(entry.mob.getUniqueId());
                 restoreIfOwned(entry);
+            }
+        }
+        // Libera primero el cupo de los mobs que salieron del radio, para que
+        // los nuevos tengan barra en este escaneo aun con el límite lleno.
+        for (LivingEntity mob : seen.values()) {
+            if (!tracked.containsKey(mob.getUniqueId())) {
+                recoverIfMarked(mob);
+                if (tracked.size() < maximumTracked && eligible(mob)) {
+                    acquire(mob);
+                }
             }
         }
     }
@@ -184,15 +258,18 @@ public final class ExiledHealthBarsPlugin extends JavaPlugin implements Listener
         if (tracked.containsKey(id) || !eligible(mob)) {
             return;
         }
-        TrackedMob entry = new TrackedMob(mob, mob.getCustomName(), mob.isCustomNameVisible());
+        TrackedMob entry = new TrackedMob(mob, mob.customName(), mob.isCustomNameVisible());
         tracked.put(id, entry);
         PersistentDataContainer data = mob.getPersistentDataContainer();
         data.set(managedKey, PersistentDataType.BYTE, (byte) 1);
         data.set(oldVisibleKey, PersistentDataType.BYTE, entry.originalVisible ? (byte) 1 : (byte) 0);
         if (entry.originalName != null) {
             data.set(oldNameKey, PersistentDataType.STRING, entry.originalName);
+            data.set(oldNameJsonKey, PersistentDataType.STRING,
+                    GsonComponentSerializer.gson().serialize(entry.originalNameComponent));
         } else {
             data.remove(oldNameKey);
+            data.remove(oldNameJsonKey);
         }
         apply(entry);
     }
@@ -203,16 +280,11 @@ public final class ExiledHealthBarsPlugin extends JavaPlugin implements Listener
             UUID id = mob.getUniqueId();
             if (!mob.isValid() || mob.isDead() || mob.getHealth() <= 0) {
                 tracked.remove(id);
-                if (mob.isValid()) {
-                    restoreIfOwned(entry);
-                }
+                restoreIfOwned(entry);
                 continue;
             }
-            if (!Objects.equals(mob.getCustomName(), entry.lastApplied)) {
-                // Otro plugin cambió el nombre; no entrar en una guerra de nombres.
-                tracked.remove(id);
-                externallyControlled.add(id);
-                clearBackup(mob);
+            if (!ownsName(entry)) {
+                relinquish(entry);
                 continue;
             }
             if (!nearbyMode && serverTicks >= entry.expireAtTick) {
@@ -229,21 +301,32 @@ public final class ExiledHealthBarsPlugin extends JavaPlugin implements Listener
         AttributeInstance attribute = mob.getAttribute(Attribute.MAX_HEALTH);
         double max = attribute != null ? attribute.getValue() : Math.max(20.0, mob.getHealth());
         // Respetar nombres originalmente ocultos; la barra sí será visible.
-        String label = entry.originalVisible ? entry.originalName : null;
-        if (showMobName && (label == null || label.isBlank())) {
-            label = entry.originalName != null ? entry.originalName : mob.getType().name().replace('_', ' ');
+        Component label = entry.originalVisible ? entry.originalNameComponent : null;
+        if (showMobName && (label == null || entry.originalName == null || entry.originalName.isBlank())) {
+            label = entry.originalNameComponent != null ? entry.originalNameComponent
+                    : Component.text(mob.getType().name().replace('_', ' '));
         }
-        String result = HealthBarFormatter.format(mob.getHealth(), max, barLength, showNumbers, label);
+        String result = HealthBarFormatter.format(mob.getHealth(), max, barLength, showNumbers, null);
         if (!result.equals(entry.lastFormatted)) {
-            // Paper puede normalizar los codigos RGB al serializar el nombre.
-            // Comparar siempre con el valor real que devuelve getCustomName().
-            mob.setCustomName(result);
-            entry.lastApplied = mob.getCustomName();
+            // Comparar el componente real de Paper para detectar también cambios
+            // externos de fuente, traducción o eventos que el texto legacy pierde.
+            Component formatted = LEGACY.deserialize(result);
+            if (label != null) {
+                // No aplanar la fuente, traducción o eventos del nombre original.
+                formatted = Component.empty().append(label).append(Component.text(" ")).append(formatted);
+            }
+            mob.customName(formatted);
+            entry.lastAppliedComponent = mob.customName();
+            entry.lastApplied = entry.lastAppliedComponent != null
+                    ? LEGACY.serialize(entry.lastAppliedComponent) : null;
             entry.lastFormatted = result;
             // Guardamos el nombre EXACTO aplicado para recuperarlo tras un cierre abrupto.
             if (entry.lastApplied != null) {
                 mob.getPersistentDataContainer().set(lastAppliedKey,
                         PersistentDataType.STRING, entry.lastApplied);
+                mob.getPersistentDataContainer().set(lastAppliedJsonKey,
+                        PersistentDataType.STRING,
+                        GsonComponentSerializer.gson().serialize(entry.lastAppliedComponent));
             }
         }
         if (!mob.isCustomNameVisible()) {
@@ -253,14 +336,51 @@ public final class ExiledHealthBarsPlugin extends JavaPlugin implements Listener
 
     private void restoreIfOwned(TrackedMob entry) {
         LivingEntity mob = entry.mob;
-        if (!mob.isValid()) {
-            return;
-        }
-        if (Objects.equals(mob.getCustomName(), entry.lastApplied)) {
-            mob.setCustomName(entry.originalName);
+        if (ownsName(entry)) {
+            mob.customName(entry.originalNameComponent);
             mob.setCustomNameVisible(entry.originalVisible);
         }
         clearBackup(mob);
+    }
+
+    private boolean ownsName(TrackedMob entry) {
+        return Objects.equals(entry.mob.customName(), entry.lastAppliedComponent);
+    }
+
+    private void relinquish(TrackedMob entry) {
+        UUID id = entry.mob.getUniqueId();
+        tracked.remove(id);
+        externallyControlled.add(id);
+        clearBackup(entry.mob);
+    }
+
+    private Component savedName(PersistentDataContainer data, NamespacedKey jsonKey, NamespacedKey legacyKey) {
+        String json = data.get(jsonKey, PersistentDataType.STRING);
+        if (json != null) {
+            try {
+                return GsonComponentSerializer.gson().deserialize(json);
+            } catch (JsonParseException | IllegalArgumentException exception) {
+                getLogger().warning("Copia de nombre inválida en " + jsonKey
+                        + "; se usará la copia legacy.");
+            }
+        }
+        String legacy = data.get(legacyKey, PersistentDataType.STRING);
+        return legacy != null ? LEGACY.deserialize(legacy) : null;
+    }
+
+    private boolean ownsPersistedName(LivingEntity mob) {
+        PersistentDataContainer data = mob.getPersistentDataContainer();
+        if (!data.has(managedKey, PersistentDataType.BYTE)) {
+            return false;
+        }
+        if (data.has(lastAppliedJsonKey, PersistentDataType.STRING)) {
+            Component applied = savedName(data, lastAppliedJsonKey, lastAppliedKey);
+            return applied != null && Objects.equals(applied, mob.customName());
+        }
+        // Las versiones anteriores guardaban getCustomName(): conservar esa
+        // comparación exacta para recuperar también sus barras normalizadas.
+        String applied = data.get(lastAppliedKey, PersistentDataType.STRING);
+        return applied != null && Objects.equals(applied, mob.getCustomName());
     }
 
     private void recoverIfMarked(LivingEntity mob) {
@@ -268,9 +388,8 @@ public final class ExiledHealthBarsPlugin extends JavaPlugin implements Listener
         if (!data.has(managedKey, PersistentDataType.BYTE)) {
             return;
         }
-        String applied = data.get(lastAppliedKey, PersistentDataType.STRING);
-        if (applied != null && Objects.equals(applied, mob.getCustomName())) {
-            mob.setCustomName(data.get(oldNameKey, PersistentDataType.STRING));
+        if (ownsPersistedName(mob)) {
+            mob.customName(savedName(data, oldNameJsonKey, oldNameKey));
             mob.setCustomNameVisible(Byte.valueOf((byte) 1).equals(data.get(oldVisibleKey, PersistentDataType.BYTE)));
         }
         clearBackup(mob);
@@ -282,10 +401,15 @@ public final class ExiledHealthBarsPlugin extends JavaPlugin implements Listener
         data.remove(oldNameKey);
         data.remove(oldVisibleKey);
         data.remove(lastAppliedKey);
+        data.remove(oldNameJsonKey);
+        data.remove(lastAppliedJsonKey);
     }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onDamage(EntityDamageByEntityEvent event) {
+        if (event.isCancelled() || event.getFinalDamage() <= 0.0 || nearbyMode) {
+            return;
+        }
         Entity direct = event.getDamager();
         LivingEntity attacker = direct instanceof LivingEntity living ? living : null;
         if (direct instanceof Projectile projectile) {
@@ -293,24 +417,6 @@ public final class ExiledHealthBarsPlugin extends JavaPlugin implements Listener
             if (source instanceof LivingEntity living) {
                 attacker = living;
             }
-        }
-
-        // El mensaje vanilla de muerte usa el customName actual del atacante. Como la
-        // barra vive temporalmente en ese campo, un mob rastreado aparecería en el chat
-        // con la barra en lugar de su nombre. En un golpe letal exponemos su nombre real
-        // hasta que Minecraft haya construido el mensaje y restauramos la barra al tick
-        // siguiente.
-        if (attacker != null && !(attacker instanceof Player)
-                && event.getEntity() instanceof Player player
-                && event.getFinalDamage() >= player.getHealth()) {
-            TrackedMob entry = tracked.get(attacker.getUniqueId());
-            if (entry != null) {
-                exposeOriginalNameForDeathMessage(entry);
-            }
-        }
-
-        if (nearbyMode) {
-            return;
         }
 
         // La barra solo se activa cuando el daño parte de un jugador, directamente
@@ -322,14 +428,23 @@ public final class ExiledHealthBarsPlugin extends JavaPlugin implements Listener
         }
         if (mob != null) {
             LivingEntity target = mob;
+            long generation = taskGeneration;
             Bukkit.getScheduler().runTask(this, () -> {
+                if (generation != taskGeneration || nearbyMode || event.isCancelled()) {
+                    return;
+                }
+                updateClock();
+                TrackedMob entry = tracked.get(target.getUniqueId());
+                if (entry != null && !ownsName(entry)) {
+                    relinquish(entry);
+                    return;
+                }
                 if (!tracked.containsKey(target.getUniqueId())) {
                     recoverIfMarked(target);
                 }
                 if (!eligible(target)) {
                     return;
                 }
-                TrackedMob entry = tracked.get(target.getUniqueId());
                 if (entry == null && tracked.size() < maximumTracked) {
                     acquire(target);
                     entry = tracked.get(target.getUniqueId());
@@ -342,41 +457,43 @@ public final class ExiledHealthBarsPlugin extends JavaPlugin implements Listener
         }
     }
 
-    private void exposeOriginalNameForDeathMessage(TrackedMob entry) {
-        LivingEntity mob = entry.mob;
-        if (!Objects.equals(mob.getCustomName(), entry.lastApplied)) {
-            return;
+    @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = true)
+    public void onPlayerDeath(PlayerDeathEvent event) {
+        // El mensaje ya está construido: también cubre proyectiles y caídas/fuego
+        // atribuidos a un mob, sin predecir golpes letales ni tocar su barra.
+        event.deathMessage(DeathMessageSanitizer.restoreEntityNames(
+                event.deathMessage(), this::deathMessageNames));
+        Component screenMessage = event.deathScreenMessageOverride();
+        if (screenMessage != null) {
+            event.deathScreenMessageOverride(DeathMessageSanitizer.restoreEntityNames(
+                    screenMessage, this::deathMessageNames));
         }
-
-        mob.setCustomName(entry.originalName);
-        mob.setCustomNameVisible(entry.originalVisible);
-        entry.lastApplied = mob.getCustomName();
-        // Obliga a apply() a escribir nuevamente la barra aunque la vida no haya cambiado.
-        entry.lastFormatted = null;
-
-        Bukkit.getScheduler().runTask(this, () -> {
-            UUID id = mob.getUniqueId();
-            if (tracked.get(id) != entry || !mob.isValid() || mob.isDead()) {
-                return;
-            }
-            if (!Objects.equals(mob.getCustomName(), entry.lastApplied)) {
-                // Otro plugin aprovechó el intervalo para controlar el nombre.
-                tracked.remove(id);
-                externallyControlled.add(id);
-                clearBackup(mob);
-                return;
-            }
-            if (!nearbyMode && serverTicks >= entry.expireAtTick) {
-                tracked.remove(id);
-                restoreIfOwned(entry);
-                return;
-            }
-            apply(entry);
-        });
     }
 
-    @EventHandler
+    private DeathMessageSanitizer.EntityNames deathMessageNames(UUID id) {
+        TrackedMob entry = tracked.get(id);
+        if (entry != null && ownsName(entry)) {
+            return new DeathMessageSanitizer.EntityNames(entry.originalDisplayName, entry.lastAppliedComponent);
+        }
+
+        // Puede haber una barra persistida tras un cierre abrupto, antes del
+        // primer escaneo o ataque que vuelva a registrar al mob.
+        if (Bukkit.getEntity(id) instanceof LivingEntity mob && !(mob instanceof Player)) {
+            PersistentDataContainer data = mob.getPersistentDataContainer();
+            if (ownsPersistedName(mob)) {
+                Component original = savedName(data, oldNameJsonKey, oldNameKey);
+                return new DeathMessageSanitizer.EntityNames(original != null ? original
+                        : Component.translatable(mob.getType().translationKey()), mob.customName());
+            }
+        }
+        return null;
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onDeath(EntityDeathEvent event) {
+        if (event.isCancelled()) {
+            return;
+        }
         UUID id = event.getEntity().getUniqueId();
         externallyControlled.remove(id);
         TrackedMob entry = tracked.remove(id);
@@ -386,9 +503,8 @@ public final class ExiledHealthBarsPlugin extends JavaPlugin implements Listener
     }
 
     @EventHandler
-    public void onChunkUnload(ChunkUnloadEvent event) {
-        Chunk chunk = event.getChunk();
-        for (Entity entity : chunk.getEntities()) {
+    public void onEntitiesUnload(EntitiesUnloadEvent event) {
+        for (Entity entity : event.getEntities()) {
             UUID id = entity.getUniqueId();
             externallyControlled.remove(id);
             TrackedMob entry = tracked.remove(id);
@@ -396,6 +512,66 @@ public final class ExiledHealthBarsPlugin extends JavaPlugin implements Listener
                 restoreIfOwned(entry);
             } else if (entity instanceof LivingEntity mob) {
                 recoverIfMarked(mob);
+            }
+        }
+    }
+
+    @EventHandler
+    public void onEntitiesLoad(EntitiesLoadEvent event) {
+        for (Entity entity : event.getEntities()) {
+            if (entity instanceof LivingEntity mob && !tracked.containsKey(entity.getUniqueId())) {
+                recoverIfMarked(mob);
+            }
+        }
+    }
+
+    @EventHandler
+    public void onEntityRemoved(EntityRemoveFromWorldEvent event) {
+        UUID id = event.getEntity().getUniqueId();
+        externallyControlled.remove(id);
+        TrackedMob entry = tracked.remove(id);
+        if (entry != null) {
+            restoreIfOwned(entry);
+        }
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onTransform(EntityTransformEvent event) {
+        if (event.isCancelled()) {
+            return;
+        }
+        if (!(event.getEntity() instanceof LivingEntity source)) {
+            return;
+        }
+        TrackedMob entry = tracked.get(source.getUniqueId());
+        Component original;
+        Component applied;
+        boolean visible;
+        if (entry != null) {
+            original = entry.originalNameComponent;
+            applied = entry.lastAppliedComponent;
+            visible = entry.originalVisible;
+        } else {
+            PersistentDataContainer data = source.getPersistentDataContainer();
+            if (!data.has(managedKey, PersistentDataType.BYTE)) {
+                return;
+            }
+            original = savedName(data, oldNameJsonKey, oldNameKey);
+            applied = savedName(data, lastAppliedJsonKey, lastAppliedKey);
+            visible = Byte.valueOf((byte) 1).equals(data.get(oldVisibleKey, PersistentDataType.BYTE));
+        }
+        if (applied == null) {
+            return;
+        }
+        // Vanilla copia el nametag a un UUID nuevo, pero no la copia PDC. La
+        // entidad transformada aún puede no estar añadida al mundo en este evento.
+        // Comparar con la barra registrada: otro listener pudo renombrar solo
+        // el origen después de que vanilla copiara su nombre al destino.
+        for (Entity entity : event.getTransformedEntities()) {
+            if (entity instanceof LivingEntity mob && Objects.equals(mob.customName(), applied)) {
+                mob.customName(original);
+                mob.setCustomNameVisible(visible);
+                clearBackup(mob);
             }
         }
     }
@@ -429,14 +605,20 @@ public final class ExiledHealthBarsPlugin extends JavaPlugin implements Listener
         final LivingEntity mob;
         final String originalName;
         final boolean originalVisible;
+        final Component originalNameComponent;
+        final Component originalDisplayName;
         String lastApplied;
+        Component lastAppliedComponent;
         String lastFormatted;
         long expireAtTick;
 
-        TrackedMob(LivingEntity mob, String originalName, boolean originalVisible) {
+        TrackedMob(LivingEntity mob, Component originalNameComponent, boolean originalVisible) {
             this.mob = mob;
-            this.originalName = originalName;
+            this.originalNameComponent = originalNameComponent;
+            this.originalName = originalNameComponent != null ? LEGACY.serialize(originalNameComponent) : null;
             this.originalVisible = originalVisible;
+            this.originalDisplayName = originalNameComponent != null ? originalNameComponent
+                    : Component.translatable(mob.getType().translationKey());
         }
     }
 }

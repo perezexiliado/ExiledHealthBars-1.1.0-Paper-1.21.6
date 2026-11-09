@@ -9,8 +9,12 @@ Actualización del plugin para **Paper 1.21.6 / Java 21**, sin dependencias de t
 - En modo `NEARBY`, solo escanea entidades cercanas a jugadores una vez por segundo. En ambos modos limita a 500 barras simultáneas y actualiza vida y color cada 5 ticks.
 - Conserva el modo opcional `NEARBY` para servidores que prefieran barras siempre visibles alrededor de los jugadores.
 - Restaura los nombres originales al alejarse, morir el mob, descargarse su chunk, recargar o deshabilitar el plugin. Guarda copia de seguridad por entidad en PDC para intentar recuperar nombres después de un cierre inesperado.
-- Los mensajes de muerte muestran el nombre real del mob atacante en lugar del texto de su barra de vida, también cuando ataca mediante un proyectil.
+- Conserva los componentes completos del nombre (colores RGB, fuentes y traducciones), tanto sobre la barra como al restaurarlo. Las copias PDC usan JSON y siguen recuperando las copias legacy de versiones anteriores. Recupera barras persistidas al iniciar y al cargar entidades, también en `COMBAT`.
+- Los mensajes de muerte muestran el nombre original del mob, con sus colores, o el tipo de entidad traducido por el cliente. La corrección se aplica al mensaje de `PlayerDeathEvent`, también para proyectiles y muertes indirectas atribuidas al mob (por ejemplo, una caída), y limpia el nombre del tooltip sin interrumpir la barra sobre la entidad.
+- La limpieza del mensaje reemplaza únicamente la barra registrada: conserva el texto de mensajes personalizados y los hovers ajenos, incluso cuando el hover del mob está en un contenedor.
 - Si otro plugin cambia el nombre mientras se muestra una barra, no vuelve a pisárselo hasta que el mob salga del área rastreada.
+- Calcula la duración con ticks reales, respeta los intervalos de escaneo y actualización, y libera el cupo de mobs alejados antes de adquirir otros. Los conflictos de nombres también se liberan al salir del radio en `COMBAT`.
+- Una muerte o transformación cancelada conserva el seguimiento. Las transformaciones exitosas no heredan la barra como nombre permanente. Los ataques sin daño no activan barras y los callbacks pendientes se descartan al recargar o deshabilitar el plugin.
 
 ## Compilar e instalar
 
@@ -38,16 +42,12 @@ Se muestra mediante el nombre visible vanilla del mob, sin pack de texturas ni h
 
 ## Límites y pruebas
 
-No hay forma de mostrar una barra encima del mob sin potencial interacción con otros plugins que controlan el mismo nametag usando esta estrategia vanilla. El límite de 500 significa que en un servidor extremadamente poblado algunas entidades pueden quedar temporalmente sin barra: subilo gradualmente si tu rendimiento lo permite. La API oficial de Paper no está disponible en el entorno de preparación: antes de usarlo en producción, compilar contra la dependencia declarada con Maven y probarlo en tu servidor.
+No hay forma de mostrar una barra encima del mob sin potencial interacción con otros plugins que controlan el mismo nametag usando esta estrategia vanilla. El límite de 500 significa que en un servidor extremadamente poblado algunas entidades pueden quedar temporalmente sin barra: subilo gradualmente si tu rendimiento lo permite. El JAR se compila contra la API oficial de Paper 1.21.6 con bytecode para Java 21. Las pruebas automáticas no sustituyen una prueba dentro del servidor.
 
-Prueba aislada del formato (sin Paper):
+Pruebas automáticas del formato, los mensajes de muerte y el ciclo de vida, sin iniciar un servidor:
 
 ```sh
-mkdir -p .check
-javac -encoding UTF-8 -d .check src/main/java/me/exi/healthbars/HealthBarFormatter.java src/test/java/me/exi/healthbars/HealthBarFormatterSelfTest.java
-java -cp .check me.exi.healthbars.HealthBarFormatterSelfTest
+mvn test
 ```
 
-### JAR opcional de verificación
-
-Si recibiste por separado `ExiledHealthBars-1.1.0-verificacion.jar`, se generó con Java 21 contra **interfaces locales de compatibilidad**, no contra el JAR oficial de Paper, porque aquí no se disponía de repositorios Maven. Compiló correctamente y superó las pruebas aisladas (colores, oveja pasiva, cambio de vida, salida del rango y restauración del nombre); eso **no garantiza** que funcione en un servidor Paper real. La instalación recomendada sigue siendo compilar el ZIP con `mvn clean package` para producir el JAR oficial para tu entorno.
+Las pruebas cubren traducciones, nombres personalizados, datos del arma, UUID distintos con barras iguales, mensajes desactivados, redondeo de vida, restauración de nombres completos, recuperación PDC, conflictos con otros plugins, muertes canceladas, recargas, duración y transformaciones. La implementación utiliza los componentes de la [API de PlayerDeathEvent de Paper 1.21.6](https://jd.papermc.io/paper/1.21.6/org/bukkit/event/entity/PlayerDeathEvent.html) y los eventos de [carga](https://jd.papermc.io/paper/1.21.6/org/bukkit/event/world/EntitiesLoadEvent.html) y [descarga de entidades](https://jd.papermc.io/paper/1.21.6/org/bukkit/event/world/EntitiesUnloadEvent.html).

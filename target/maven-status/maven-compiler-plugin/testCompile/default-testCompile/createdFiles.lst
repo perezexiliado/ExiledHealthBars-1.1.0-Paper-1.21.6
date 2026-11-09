@@ -1,1 +1,5 @@
-me\exi\healthbars\HealthBarFormatterSelfTest.class
+me\exi\healthbars\HealthBarFormatterTest.class
+me\exi\healthbars\DeathMessageSanitizerTest.class
+me\exi\healthbars\ExiledHealthBarsPluginTest$MobState.class
+me\exi\healthbars\ExiledHealthBarsPluginTest$PlayerState.class
+me\exi\healthbars\ExiledHealthBarsPluginTest.class

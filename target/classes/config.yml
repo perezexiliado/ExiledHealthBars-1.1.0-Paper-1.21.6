@@ -6,7 +6,8 @@ display:
   # COMBAT: visible solo despues de que un jugador ataque al mob (predeterminado).
   # NEARBY: visible siempre mientras el mob este cerca de algun jugador.
   mode: COMBAT
-  # Radio por jugador. No escanea entidades de todos los mundos (rendimiento).
+  # Radio por jugador en NEARBY y para liberar conflictos de nombres en COMBAT.
+  # No escanea entidades de todos los mundos en las actualizaciones periódicas.
   radius-blocks: 32
   # Revisa mobs nuevos y fuera de alcance una vez por segundo.
   scan-interval-ticks: 20
